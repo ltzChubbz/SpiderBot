@@ -1,0 +1,806 @@
+// This is the main program
+#include "fmath.h"
+#include "coor.h"
+//#include <Servo.h>
+#include <PololuMaestro.h>
+#include <SoftwareSerial.h>
+
+SoftwareSerial BT(0, 1);
+SoftwareSerial maestroSerial(19, 18);
+MiniMaestro maestro(maestroSerial);
+
+// Define Leg Numbers
+#define LF 0
+#define LMF 1
+#define LMR 2
+#define LR 3
+#define RF 4
+#define RMF 5
+#define RMR 6
+#define RR 7
+
+// Bluetooth Command
+byte packet[4];
+int pIndex;
+
+//Servo legServo[18];
+// servo adjust offset in micro seconds
+int servoOffset[24] = { 248, -538, -500,
+					   374, -606, -616,
+					   520, -460, -276,
+					   510, -461, -558,
+					   -529, 248, 326,
+					   -597, 306, 230,
+					   -519, 276, -58,
+					   -577, 258, -164 };
+// servo constrains
+int servoMin[24] = { 500, 500, 500 };
+int servoMax[24] = { 2500, 2500, 2500 };
+
+//[ANGLES]
+float Angle_Old[24] = { 0.0 };
+
+
+// ---------- BODY DIMENSIONS ----------
+
+const int CoxaLength = 28;          // Coxa length(mm)
+const int FemurLength = 100;          // Femur length(mm)
+const int TibiaLength = 134;          // Tibia length(mm)
+const int HexSideLength = 75;        // distance between coxas(mm)
+
+const int FLxFL = FemurLength * FemurLength;
+const int TLxTL = TibiaLength * TibiaLength;
+const int FLxTL = FemurLength * TibiaLength;
+
+const int AngleOffset[8] = { 22.5, 67.5, 112.5, 157.5, 202.5, 247.5, 292.5, 337.5 };
+//const int            AngleOffset[6] = {30, 90, 150, 210, 270, 330};
+
+coor2 BodyCoxaOffset;
+coor2 BCOffset[8];		//Distance from center of the body to the coxas
+coor CurPos[8];		//Start positions of the legs
+
+// -------------- Gait --------------
+
+int GaitStep = 1;
+int LegLiftHeight = 50;
+
+int TLDivFactor = 0; //Steps that a tibia is on the floor
+int NrLiftedPos = 0; //Nuumber of steps that leg is in the air
+int HalfLiftHeight = 0;  //If this is 1, Legs will be lifted to half the set height
+
+int StepsInGait = 0;  //Number of steps in gait
+int GaitLegNr[8]; //Init position of the leg
+
+coor GaitPos[8];
+
+// -------------- Balance -------------
+
+coor TotalTrans;
+coor TotalBal;
+
+//--------------------------------------------------------------------
+//[VARIABLES]
+
+// inputs
+coor BodyPos; //Global Input for the position of the body
+coor BodyRot; //Global Input pitch of the body
+
+coor WalkLength; // Global Input for the walking
+
+int speed = 2; // get from input
+int mode = 0;
+
+//================================================================
+//================================================================
+
+
+void setup()
+{
+	BT.begin(9600);
+	maestroSerial.begin(9600);
+	Serial.begin(9600);
+	// ==================== Init Values ======================
+	// [DIMENSION PARAMETERS]
+	BodyCoxaOffset.X = 38.3;
+	BodyCoxaOffset.Z = 92.4;
+
+	BCOffset[RF].X = BodyCoxaOffset.X;     //Distance X from center of the body to the Right Front coxa
+	BCOffset[RF].Z = BodyCoxaOffset.Z;          //Distance Z from center of the body to the Right Front coxa
+
+	BCOffset[RMF].X = BodyCoxaOffset.Z;          //Distance X from center of the body to the Right Middle coxa
+	BCOffset[RMF].Z = BodyCoxaOffset.X;          //Distance Z from center of the body to the Right Middle coxa
+
+	BCOffset[RMR].X = BodyCoxaOffset.Z;          //Distance X from center of the body to the Right Middle coxa
+	BCOffset[RMR].Z = -BodyCoxaOffset.X;          //Distance Z from center of the body to the Right Middle coxa
+
+	BCOffset[RR].X = BodyCoxaOffset.X;          //Distance X from center of the body to the Right Rear coxa
+	BCOffset[RR].Z = -BodyCoxaOffset.Z;          //Distance Z from center of the body to the Right Rear coxa
+
+
+	BCOffset[LF].X = -BodyCoxaOffset.X;          //Distance X from center of the body to the Left Front coxa
+	BCOffset[LF].Z = BodyCoxaOffset.Z;          //Distance Z from center of the body to the Left Front coxa
+
+	BCOffset[LMF].X = -BodyCoxaOffset.Z;               //Distance Z from center of the body to the Left Middle coxa
+	BCOffset[LMF].Z = BodyCoxaOffset.X;               //Distance Z from center of the body to the Left Middle coxa
+
+	BCOffset[LMR].X = -BodyCoxaOffset.Z;               //Distance Z from center of the body to the Left Middle coxa
+	BCOffset[LMR].Z = -BodyCoxaOffset.X;               //Distance Z from center of the body to the Left Middle coxa
+
+	BCOffset[LR].X = -BodyCoxaOffset.X;          //Distance X from center of the body to the Left Rear coxa
+	BCOffset[LR].Z = -BodyCoxaOffset.Z;          //Distance Z from center of the body to the Left Rear coxa
+
+	//--------------------------------------------------------------------
+	//[INITIAL LEG POSITIONS]
+	CurPos[RF].X = cos(DegToRad(67.5)) * (FemurLength + CoxaLength);          //Start positions of the Right Front leg
+	CurPos[RF].Y = TibiaLength;
+	CurPos[RF].Z = sin(DegToRad(67.5)) * (FemurLength + CoxaLength);
+
+	CurPos[RMF].X = cos(DegToRad(22.5)) * (FemurLength + CoxaLength);     //Start positions of the Right Middle leg
+	CurPos[RMF].Y = TibiaLength;
+	CurPos[RMF].Z = sin(DegToRad(22.5)) * (FemurLength + CoxaLength);
+
+	CurPos[RMR].X = cos(DegToRad(22.5)) * (FemurLength + CoxaLength);     //Start positions of the Right Middle leg
+	CurPos[RMR].Y = TibiaLength;
+	CurPos[RMR].Z = -sin(DegToRad(22.5)) * (FemurLength + CoxaLength);
+
+	CurPos[RR].X = cos(DegToRad(67.5)) * (FemurLength + CoxaLength);          //Start positions of the Right Rear leg
+	CurPos[RR].Y = TibiaLength;
+	CurPos[RR].Z = -sin(DegToRad(67.5)) * (FemurLength + CoxaLength);
+
+	CurPos[LF].X = -cos(DegToRad(67.5)) * (FemurLength + CoxaLength);          //Start positions of the Left Front leg
+	CurPos[LF].Y = TibiaLength;
+	CurPos[LF].Z = sin(DegToRad(67.5)) * (FemurLength + CoxaLength);
+
+	CurPos[LMF].X = -cos(DegToRad(22.5)) * (FemurLength + CoxaLength);     //Start positions of the Left Middle leg
+	CurPos[LMF].Y = TibiaLength;
+	CurPos[LMF].Z = sin(DegToRad(22.5)) * (FemurLength + CoxaLength);
+
+	CurPos[LMR].X = -cos(DegToRad(22.5)) * (FemurLength + CoxaLength);    //Start positions of the Left Middle leg
+	CurPos[LMR].Y = TibiaLength;
+	CurPos[LMR].Z = -sin(DegToRad(22.5)) * (FemurLength + CoxaLength);
+
+	CurPos[LR].X = -cos(DegToRad(67.5)) * (FemurLength + CoxaLength);          //Start positions of the Left Rear leg
+	CurPos[LR].Y = TibiaLength;
+	CurPos[LR].Z = -sin(DegToRad(67.5)) * (FemurLength + CoxaLength);
+
+
+
+
+	// ================  Servos  ==================
+
+	for (int i = 0; i < 24; i++) {
+		maestro.setSpeed(i, 10);
+		delay(10);
+		maestro.setAcceleration(i, 25);
+		delay(10);
+		maestro.setTarget(i, ((1500 + servoOffset[i]) * 4));
+		delay(100);
+	}
+
+
+	// ================  Gait  ==================
+	GaitSelect(1);
+
+	//ResetLegPosition();
+	delay(2000);
+
+}
+
+
+void loop() {
+
+	int i = 0;
+	float Angle[24] = { 0.0 };
+
+	coor posIO;
+	coor rotIO;
+
+	BodyPos.Reset();
+	BodyRot.Reset();
+	WalkLength.Reset();
+
+
+	// see if there's incoming serial data:
+
+	//if (BT.available() > 0)  {
+	//packet[pIndex++] = (BT.read());	
+	//}
+	packet[0] = 121;
+	packet[1] = 70;
+	packet[2] = 128;
+	packet[3] = 25;
+	pIndex = 4;
+	// If we recieved the 3 bytes, then go execute them
+	if (pIndex >= 4) {
+
+		// --------- Controller Input --------------
+		GetCommandValues();
+
+		// -------- Gaits Calculation --------------
+		GaitCalculate(WalkLength);
+
+		pIndex = 4;
+		BT.write(1); // send the request for next bytes
+		Serial.print("Packet: ");
+		Serial.print(packet[0]);
+		Serial.print(", ");
+		Serial.print(packet[1]);
+		Serial.print(", ");
+		Serial.print(packet[2]);
+		Serial.print(", ");
+		Serial.println(packet[3]);
+		// ------- Balancing Calculation ------------
+		//BodyBalance();
+
+		// ----- IK -------
+
+		for (int LegIndex = 0; LegIndex < 8; LegIndex++) {
+
+			posIO.X = CurPos[LegIndex].X + BodyPos.X + GaitPos[LegIndex].X;
+			posIO.Z = CurPos[LegIndex].Z + BodyPos.Z + GaitPos[LegIndex].Z;
+			posIO.Y = CurPos[LegIndex].Y + BodyPos.Y + GaitPos[LegIndex].Y;
+
+			rotIO.X = BodyRot.X;
+			rotIO.Z = BodyRot.Z;
+			rotIO.Y = BodyRot.Y + GaitPos[LegIndex].RotY;
+
+			InverseKinematics(rotIO, posIO, BCOffset[LegIndex], AngleOffset[LegIndex], &Angle[i++], &Angle[i++], &Angle[i++]);
+			//Angle[i++] = IKCoxaAngle; 
+			//Angle[i++] = IKFemurAngle;
+			//Angle[i++] = IKTibiaAngle;
+
+		}
+
+		//PrintServoAngles();
+		UpdateLeg(Angle);
+
+		// Save last loop angle values
+		for (int i = 0; i < 24; i++) {
+			Angle_Old[i] = Angle[i];
+		}
+
+	}
+
+
+
+}
+
+// ================================================================
+// ================================================================
+
+
+void GaitSelect(int GaitType) {
+	//Gait selector
+
+		//Ripple Gait 24 steps
+	GaitLegNr[LR] = 1;
+	GaitLegNr[RMF] = 4;
+	GaitLegNr[LMR] = 7;
+	GaitLegNr[RF] = 10;
+	GaitLegNr[LMF] = 13;
+	GaitLegNr[RR] = 16;
+	GaitLegNr[LF] = 19;
+	GaitLegNr[RR] = 22;
+
+
+	NrLiftedPos = 3;
+	TLDivFactor = 18;
+	StepsInGait = 24;
+}
+
+coor GaitCalculate(coor WalkLength) {
+	//Calculate Gait positions
+
+	for (int LegIndex = 0; LegIndex < 8; LegIndex++) {
+
+		bool walking = ((abs(WalkLength.X) > 10) || (abs(WalkLength.Z) > 10) || (abs(WalkLength.RotY) > 10));
+		bool homePosition = (abs(GaitPos[LegIndex].X) < 10) && (abs(GaitPos[LegIndex].Z) < 10) && (abs(GaitPos[LegIndex].RotY) < 10);
+
+
+		if (walking && GaitStep == GaitLegNr[LegIndex]) {
+
+			GaitPos[LegIndex].X = -WalkLength.X / 2 * FSIN_TABLE[80];
+			GaitPos[LegIndex].Z = -WalkLength.Z / 2 * FSIN_TABLE[80];
+			GaitPos[LegIndex].Y = -LegLiftHeight * FSIN_TABLE[20];
+			GaitPos[LegIndex].RotY = -WalkLength.RotY / 2 * FSIN_TABLE[80];
+
+		}
+		else if (walking && GaitStep == GaitLegNr[LegIndex] + 1) {
+
+			GaitPos[LegIndex].X = -WalkLength.X / 2 * FSIN_TABLE[30];
+			GaitPos[LegIndex].Z = -WalkLength.Z / 2 * FSIN_TABLE[30];
+			GaitPos[LegIndex].Y = -LegLiftHeight * FSIN_TABLE[70];
+			GaitPos[LegIndex].RotY = -WalkLength.RotY / 2 * FSIN_TABLE[30];
+
+		}
+		else if ((walking && GaitStep == GaitLegNr[LegIndex] + 2) || (walking == false && homePosition == false && GaitStep == GaitLegNr[LegIndex])) {
+
+			GaitPos[LegIndex].X = -WalkLength.X / 2;
+			GaitPos[LegIndex].Z = -WalkLength.Z / 2;
+			GaitPos[LegIndex].Y = -LegLiftHeight;
+			GaitPos[LegIndex].RotY = -WalkLength.RotY / 2;
+
+		}
+		else if (walking && ((GaitStep == GaitLegNr[LegIndex] + 3) || (GaitStep == GaitLegNr[LegIndex] + 3 - 18))) {
+
+			GaitPos[LegIndex].X = WalkLength.X / 2 * FSIN_TABLE[30];
+			GaitPos[LegIndex].Z = WalkLength.Z / 2 * FSIN_TABLE[30];
+			GaitPos[LegIndex].Y = -LegLiftHeight * FSIN_TABLE[70];
+			GaitPos[LegIndex].RotY = WalkLength.RotY / 2 * FSIN_TABLE[30];
+
+		}
+		else if (walking && ((GaitStep == GaitLegNr[LegIndex] + 4) || (GaitStep == GaitLegNr[LegIndex] + 4 - 18))) {
+
+			GaitPos[LegIndex].X = WalkLength.X / 2 * FSIN_TABLE[80];
+			GaitPos[LegIndex].Z = WalkLength.Z / 2 * FSIN_TABLE[80];
+			GaitPos[LegIndex].Y = -LegLiftHeight * FSIN_TABLE[20];
+			GaitPos[LegIndex].RotY = WalkLength.RotY / 2 * FSIN_TABLE[80];
+
+		}
+		else if (walking && ((GaitStep == GaitLegNr[LegIndex] + 5) || (GaitStep == GaitLegNr[LegIndex] + 5 - 18))) {
+
+			GaitPos[LegIndex].X = WalkLength.X / 2;
+			GaitPos[LegIndex].Z = WalkLength.Z / 2;
+			GaitPos[LegIndex].Y = 0;
+			GaitPos[LegIndex].RotY = WalkLength.RotY / 2;
+
+		}
+		else {
+
+			GaitPos[LegIndex].X = GaitPos[LegIndex].X - (WalkLength.X / TLDivFactor);
+			GaitPos[LegIndex].Z = GaitPos[LegIndex].Z - (WalkLength.Z / TLDivFactor);
+			GaitPos[LegIndex].Y = 0;
+			GaitPos[LegIndex].RotY = GaitPos[LegIndex].RotY - (WalkLength.RotY / TLDivFactor);
+
+		}
+
+
+
+	}
+
+	//Advance to the next step
+	if (++GaitStep > StepsInGait)
+		GaitStep = 1;
+
+}
+
+
+void InverseKinematics(coor Rotation, coor RB_FeetPos, coor2 coxaOffset, int
+	, float* OUT_IKCoxaAngle, float* OUT_IKFemurAngle, float* OUT_IKTibiaAngle) {
+	// RB - related to body
+	// RC - related to coxa
+
+	// -------------------- Body IK ---------------------------
+
+	coor RB_Total;
+
+	RB_Total.X = RB_FeetPos.X + coxaOffset.X;
+	RB_Total.Z = RB_FeetPos.Z + coxaOffset.Z;
+	RB_Total.Y = RB_FeetPos.Y;
+
+	// Calculate cosine and sine of rotation angles
+	// T = theta, A = alpha, B = beta
+	float sinT = fsin(Rotation.X);  // 0
+	float cosT = fcos(Rotation.X);  // 1
+	float sinA = fsin(Rotation.Z);  // 0
+	float cosA = fcos(Rotation.Z);  // 1
+	float sinB = fsin(Rotation.Y);  // 0
+	float cosB = fcos(Rotation.Y);  // 1
+
+
+	//Calculate position corrections of feet using Rotation Matrix
+	coor RB_BodyIKPos;
+
+	RB_BodyIKPos.X = (RB_Total.X * cosA * cosB - RB_Total.Z * cosA * sinB + RB_Total.Y * sinA) - RB_Total.X;
+	RB_BodyIKPos.Z = (RB_Total.X * (sinT * sinA * cosB + cosT * sinB) + RB_Total.Z * (sinT * sinA * sinB + cosT * cosB) - RB_Total.Y * sinT * cosA) - RB_Total.Z;
+	RB_BodyIKPos.Y = (RB_Total.X * (sinT * sinB - cosT * sinA * cosB) + RB_Total.Z * (cosT * sinA * sinB + sinT * cosB) + RB_Total.Y * cosT * cosA) - RB_Total.Y;
+
+
+	// -------------------- Leg IK --------------------------
+
+	// the updated feet position 
+	RB_FeetPos.X = (RB_FeetPos.X + RB_BodyIKPos.X);
+	RB_FeetPos.Y = (RB_FeetPos.Y + RB_BodyIKPos.Y);
+	RB_FeetPos.Z = (RB_FeetPos.Z + RB_BodyIKPos.Z);
+
+
+	// Calculating the local positions
+	coor RC_FeetPos;
+
+	RC_FeetPos.X = (RB_FeetPos.X * fcos(AngleOffset)) - (RB_FeetPos.Z * fsin(AngleOffset));
+	RC_FeetPos.Z = (RB_FeetPos.X * fsin(AngleOffset)) + (RB_FeetPos.Z * fcos(AngleOffset));
+	RC_FeetPos.Y = (RB_FeetPos.Y);
+
+	//Length between the Coxa and Feet
+	float CoxaFeetDist = sqrt(RC_FeetPos.X * RC_FeetPos.X + RC_FeetPos.Z * RC_FeetPos.Z);
+
+	//IKSW - Length between shoulder and wrist
+	float IKSW = sqrt((CoxaFeetDist - CoxaLength) * (CoxaFeetDist - CoxaLength) + RC_FeetPos.Y * RC_FeetPos.Y);
+
+	//IKA1 - Angle between SW line and the ground in rad
+	float IKA1 = fatan2(CoxaFeetDist - CoxaLength, RC_FeetPos.Y);
+
+	//IKA2 - Angle between SW line and femur
+	float IKA2 = facos((FLxFL + IKSW * IKSW - TLxTL) / (2.0 * FemurLength * IKSW));
+
+	//IKFemurAngle
+	*OUT_IKFemurAngle = (IKA1 + IKA2) - PIby2;
+
+	//IKTibiaAngle
+	float TAngle = facos((TLxTL + FLxFL - IKSW * IKSW) / (2.0 * FLxTL));
+
+	// convert Tibia angle with relation to the normal of Femur axis
+	*OUT_IKTibiaAngle = PIby2 - TAngle;
+
+
+	//IKCoxaAngle
+	*OUT_IKCoxaAngle = fatan2(RC_FeetPos.X, RC_FeetPos.Z);
+
+}
+
+
+void BodyBalance() {
+
+	// ============= Leg Balance Calculation ===========
+
+	coor Total;
+
+	for (int LegIndex = 0; LegIndex < 8; LegIndex++) {
+
+		//Calculating totals from center of the body to the feet
+		Total.Z = BCOffset[LegIndex].Z + CurPos[LegIndex].Z + BodyPos.Z + GaitPos[LegIndex].Z;
+		Total.X = BCOffset[LegIndex].X + CurPos[LegIndex].X + BodyPos.X + GaitPos[LegIndex].X;
+		Total.Y = GaitPos[LegIndex].Y; // using the value 150 to lower the centerpoint of rotation 'BodyPosY +
+
+		TotalTrans.Y = TotalTrans.Y + Total.Y;
+		TotalTrans.Z = TotalTrans.Z + Total.Z;
+		TotalTrans.X = TotalTrans.X + Total.X;
+
+		TotalBal.Y = TotalBal.Y + RadToDeg(atan(Total.X / Total.Z));
+		TotalBal.Z = TotalBal.Z + RadToDeg(atan(Total.X / Total.Y));
+		TotalBal.X = TotalBal.X + RadToDeg(atan(Total.Z / Total.Y));
+
+	}
+
+	// ============= Body Balance Calculation ===========
+
+	TotalTrans.Z = TotalTrans.Z / 8;
+	TotalTrans.X = TotalTrans.X / 8;
+	TotalTrans.Y = TotalTrans.Y / 8;
+
+	if (TotalBal.Y < -180)
+		TotalBal.Y = TotalBal.Y + 360;
+	if (TotalBal.Z < -180)
+		TotalBal.Z = TotalBal.Z + 360;
+	if (TotalBal.X < -180)
+		TotalBal.X = TotalBal.X + 360;
+
+	//Balance rotation
+	TotalBal.Y = TotalBal.Y / 8;
+	TotalBal.X = TotalBal.X / 8;
+	TotalBal.Z = -TotalBal.Z / 8;
+
+	//Balance translation
+
+	for (int LegIndex = 0; LegIndex < 8; LegIndex++) {
+		GaitPos[LegIndex].Z = GaitPos[LegIndex].Z - TotalTrans.Z;
+		GaitPos[LegIndex].X = GaitPos[LegIndex].X - TotalTrans.X;
+		GaitPos[LegIndex].Y = GaitPos[LegIndex].Y - TotalTrans.Y;
+	}
+
+}
+
+void GetCommandValues() {
+
+	// Command Packet Format (4 byte): [type] [X] [Y] [Resolution]
+
+	byte jX = 0;
+	byte jZ = 0;
+	byte jY = 0;
+
+	mode = packet[0];
+
+	switch (packet[0]) {
+	case 121:	// Body Rotation (Acce X & Z)
+
+		jX = packet[1];
+		jZ = packet[2];
+		jY = packet[3];
+		BodyRot.X = map(jX, 0, 255, -13, 13);
+		BodyRot.Z = map(jZ, 0, 255, -13, 13);
+		BodyRot.Y = map(jY, 0, 255, -13, 13);
+		break;
+
+	case 122: // Walking		
+		jX = packet[1];
+		jZ = packet[2];
+		WalkLength.X = map(jX, 0, 255, -70, 70);
+		WalkLength.Z = map(jZ, 0, 255, -70, 70);
+		speed = packet[3];
+
+		break;
+
+	case 123: // Body Translation		
+		jX = packet[1];
+		jZ = packet[2];
+		BodyPos.X = map(jX, 0, 255, -30, 30);
+		BodyPos.Z = map(jZ, 0, 255, -30, 30);
+		break;
+
+	case 124: // Adjust Body Height (Button)
+
+		if (packet[1] > 178) {
+			WalkLength.RotY = map(packet[1], 0, 255, -15, 15);
+		}
+		else if (packet[1] < 78) {
+			WalkLength.RotY = map(packet[1], 0, 255, -15, 15);
+		}
+
+		if (packet[2] < 78) {
+			BodyPos.Y = map(packet[2], 0, 255, -20, 20);
+		}
+		else if (packet[2] > 178) {
+			BodyPos.Y = map(packet[2], 0, 255, -20, 20);
+		}
+
+		speed = packet[3];
+		break;
+
+	default:
+		;
+	}
+}
+
+
+
+void UpdateLeg(float Angle[24]) {
+
+	float ServoChange[24] = { 0.0 };
+
+	int delaytime = 2;
+	int Resolution = 8;;
+
+	if (mode == 122) { // Resolution becomes speed if in walking mode
+		delaytime = constrain((int)8 / (int)speed, 2, 8);
+		Resolution = speed;
+	}
+
+	for (int i = 0; i < 24; i++) {
+		if ((i == 2) || (i == 5) || (i == 8) || (i == 11) || (i == 12) || (i == 13) || (i == 15) || (i == 16) || (i == 18) || (i == 19) || (i == 21) || (i == 22)) {
+			ServoChange[i] = -((Angle[i] - Angle_Old[i]) / Resolution);
+		}
+		else {
+			ServoChange[i] = ((Angle[i] - Angle_Old[i]) / Resolution);
+		}
+	}
+
+	for (int j = 0; j < Resolution; j++) {
+
+		for (int i = 23; i >= 0; i--) {
+			int mSecond = constrain(RadToMicroV2(Angle_Old[i] + PIby2) + servoOffset[i], servoMin[i % 3], servoMax[i % 3]);
+			Angle_Old[i] = -(Angle_Old[i] + ServoChange[i]);
+
+			maestro.setTarget(i, (mSecond * 4));
+			//legServo[i].writeMicroseconds(mSecond);
+			delay(delaytime);
+		}
+
+	}
+
+}
+
+
+
+
+
+10.2.2	Coordinate Storage
+class coor {
+
+public:
+	float X;
+	float Y;
+	float Z;
+	int RotY;
+
+public:
+	coor() {
+		X = 0.0;
+		Z = 0.0;
+		Y = 0.0;
+		RotY = 0;
+	}
+
+	void Reset() {
+		X = 0.0;
+		Z = 0.0;
+		Y = 0.0;
+		RotY = 0;
+	}
+};
+
+
+class coor2 {
+public:
+	float X;
+	float Z;
+
+public:
+	coor2() {
+		X = 0.0;
+		Z = 0.0;
+	}
+
+	void Reset() {
+		X = 0.0;
+		Z = 0.0;
+	}
+};
+
+
+10.2.3	Fast Trigonometry
+#include "Arduino.h"
+
+//=================================================================
+// ================ Constants =====================================
+// =================================================================
+
+// const float PI = 3.141592;
+const float PIby2 = PI / 2;
+
+
+const float FSIN_TABLE[91] = {
+0.000000, 0.017452, 0.034900, 0.052336, 0.069757, 0.087156, 0.104529, 0.121869, 0.139173, 0.156435, 0.173648, 0.190809, 0.207912, 0.224951, 0.241922, 0.258819, 0.275637, 0.292372, 0.309017, 0.325568, 0.342020, 0.358368, 0.374607, 0.390731, 0.406737, 0.422618, 0.438371, 0.453991, 0.469472, 0.484810, 0.500000, 0.515038, 0.529919, 0.544639, 0.559193, 0.573576, 0.587785, 0.601815, 0.615662, 0.629320, 0.642788, 0.656059, 0.669131, 0.681998, 0.694658, 0.707107, 0.719340, 0.731354, 0.743145, 0.754710, 0.766044, 0.777146, 0.788011, 0.798636, 0.809017, 0.819152, 0.829038, 0.838671, 0.848048, 0.857167, 0.866025, 0.874620, 0.882948, 0.891007, 0.898794, 0.906308, 0.913546, 0.920505, 0.927184, 0.933580, 0.939693, 0.945519, 0.951057, 0.956305, 0.961262, 0.965926, 0.970296, 0.974370, 0.978148, 0.981627, 0.984808, 0.987688, 0.990268, 0.992546, 0.994522, 0.996195, 0.997564, 0.998630, 0.999391, 0.999848, 1.000000
+};
+
+const float FACOS_TABLE[51] = {
+0.643501, 0.636804, 0.630047, 0.623226, 0.616339, 0.609385, 0.602361, 0.595265, 0.588093, 0.580844, 0.573513, 0.566098, 0.558596, 0.551003, 0.543314, 0.535527, 0.527635, 0.519636, 0.511523, 0.503291, 0.494934, 0.486446, 0.477819, 0.469046, 0.460118, 0.451027, 0.441761, 0.432311,
+0.422663, 0.412803, 0.402716, 0.392384, 0.381788, 0.370904, 0.359707, 0.348166, 0.336246, 0.323904, 0.311092, 0.297747, 0.283794, 0.269140, 0.253662, 0.237199, 0.219530, 0.200335, 0.179125, 0.155075, 0.126576, 0.089473, 0
+};
+
+//=======================================================================
+// ==================== Conversion Functions ============================
+// =====================================================================
+
+
+float DegToRad(float deg) {
+	while (deg >= 360) {
+		deg -= 360;
+	}
+	return deg / 360 * 2 * PI;
+}
+
+float RadToDeg(float rad) {
+	return rad / PI * 180;
+}
+
+
+int RadToMicroV1(float rad) {
+	if (rad < 0)	rad = -rad;
+	while (rad > PI)	rad -= PI;
+	return rad / PI * 1800 + 600;
+}
+
+int RadToMicroV2(float rad) {
+
+	if (rad < 0)	rad = -rad;
+	else if (rad == 0) return 0;
+	else               return 2400 - 1800 * rad / PI;
+}
+
+int FloatToInt(float input) {
+
+	int temp = (int)input; // floor-rounded input
+	float dif = input - (float)temp;	// 
+	if (dif < 0.5)	return temp;
+	else			return temp + 1;
+}
+
+
+//=======================================================================
+// ==================== Trig functions ==================================
+// ======================================================================
+
+
+float fsin(int deg) {
+	// check for pos/neg sign
+	// get absolute value
+	int sign = 1;
+	if (deg < 0) {
+		sign = -1;
+		deg = -deg;
+	}
+	// make sure degree under 360
+	while (deg >= 360)     deg -= 360;
+
+	if (deg < 90)
+		return sign * FSIN_TABLE[deg];
+	else if ((deg >= 90) && (deg < 180))
+		return sign * FSIN_TABLE[180 - deg];
+	else if ((deg >= 180) && (deg < 270))
+		return sign * -1 * FSIN_TABLE[deg - 180];
+	else //if ((deg>=270) && (deg<360))
+		return sign * -1 * FSIN_TABLE[360 - deg];
+}
+
+float fcos(int deg) {
+	// get absolute value (symmetric)
+	if (deg < 0)    deg = -deg;
+	// make sure degree under 360
+	while (deg >= 360)     deg -= 360;
+
+	if (deg < 90)
+		return FSIN_TABLE[90 - deg];
+	else if ((deg >= 90) && (deg < 180))
+		return (-1 * FSIN_TABLE[deg - 90]);
+	else if ((deg >= 180) && (deg < 270))
+		return (-1 * FSIN_TABLE[270 - deg]);
+	else// if ((deg>=270) && (deg<360))
+		return FSIN_TABLE[deg - 270];
+}
+
+float facos(float num) {
+
+	// return 0 if input is out of range
+	if (num < -1 || num > 1) return 0;
+
+	float ACOS = 0.0;
+
+	//
+	if (num == -1.0)
+		ACOS = PI;
+	else if (num == 0.0)
+		ACOS = PIby2;
+	else if (num == 1.0)
+		ACOS = 0;
+	else {
+
+		// if num<0.8, use polynomial
+		// if num>=0.8, use table
+
+		if (abs(num) <= 0.8) {
+
+			float num2 = num * num;
+			float num3 = num2 * num;
+			float num5 = num3 * num2;
+			float num7 = num5 * num2;
+
+			ACOS = PIby2 - num - 0.166667 * num3 - 0.075 * num5 - 0.044642 * num7;
+
+		}
+
+		else {	// abs(num) > 0.8
+
+			float findex = (abs(num) * 1000.0 - 800.0) * 0.25;// convert to index
+			int index = FloatToInt(findex);
+
+			float prop = findex - (float)index; // proportion of first index
+
+			ACOS = prop * FACOS_TABLE[index] + (1 - prop) * FACOS_TABLE[index + 1];
+
+			if (num < 0.0)
+				ACOS = PI - ACOS;
+
+		}
+	}
+
+	return ACOS;
+
+}
+
+
+float fatan2(float a, float b) {
+
+	if (a == 0) {
+		if (b >= 0)	return 0;
+		else		return 0; // PI - PI
+	}
+	else if (a > 0) {
+		if (b == 0)		return PIby2;
+		else			return atan(a / b);
+	}
+	else { // a<0
+		if (b == 0)		return -PIby2;
+		else			return atan(a / b);
+	}
+
+}
